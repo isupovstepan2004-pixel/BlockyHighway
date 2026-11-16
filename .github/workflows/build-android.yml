@@ -1,0 +1,79 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+
+jobs:
+  export-android:
+    name: Export debug APK
+    runs-on: ubuntu-22.04
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup export templates
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates ~/.config/godot
+          if [ "$HOME" != "/root" ]; then
+            cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/
+          fi
+          ls ~/.local/share/godot/export_templates/
+
+      - name: Import project
+        run: timeout 300 godot --headless --import || true
+
+      - name: Configure Android SDK, Java and debug keystore
+        run: |
+          JAVAC=$(readlink -f "$(which javac || which java)")
+          JAVA_HOME_DIR=${JAVAC%/bin/*}
+          if [ -d /usr/lib/android-sdk ]; then ANDROID_SDK=/usr/lib/android-sdk
+          elif [ -n "$ANDROID_SDK_ROOT" ] && [ -d "$ANDROID_SDK_ROOT" ]; then ANDROID_SDK=$ANDROID_SDK_ROOT
+          elif [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then ANDROID_SDK=$ANDROID_HOME
+          else ANDROID_SDK=/usr/lib/android-sdk; fi
+          echo "JAVA_HOME_DIR=$JAVA_HOME_DIR"
+          echo "ANDROID_SDK=$ANDROID_SDK"
+          ls "$ANDROID_SDK" || true
+
+          KEYSTORE="$HOME/debug.keystore"
+          rm -f "$KEYSTORE"
+          keytool -genkeypair -v -keystore "$KEYSTORE" -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          mkdir -p ~/.config/godot
+          for name in editor_settings-4.tres editor_settings-4.3.tres; do
+            F=~/.config/godot/$name
+            if [ ! -f "$F" ]; then
+              printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n' > "$F"
+            fi
+            sed -i '/^export\/android\//d' "$F"
+            {
+              echo "export/android/java_sdk_path = \"$JAVA_HOME_DIR\""
+              echo "export/android/android_sdk_path = \"$ANDROID_SDK\""
+              echo "export/android/debug_keystore = \"$KEYSTORE\""
+              echo "export/android/debug_keystore_user = \"androiddebugkey\""
+              echo "export/android/debug_keystore_pass = \"android\""
+              echo "export/android/force_system_user = false"
+              echo "export/android/shutdown_adb_on_exit = true"
+            } >> "$F"
+          done
+          tail -n 12 ~/.config/godot/editor_settings-4.tres
+
+      - name: Export Android (debug)
+        run: |
+          mkdir -p build
+          godot --headless --verbose --export-debug "Android" build/BlockyHighway.apk
+          ls -l build
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlockyHighway-apk
+          path: build/BlockyHighway.apk
